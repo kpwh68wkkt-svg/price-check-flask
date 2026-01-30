@@ -2,12 +2,15 @@ from flask import Flask, request, render_template_string
 import pandas as pd
 import os
 
+# =====================
+# Flask 實例
+# =====================
 app = Flask(__name__)
 
 EXCEL_FILE = "價格整理.xlsx"
 
 # =====================
-# 主查價介面
+# 主查價頁面 HTML
 # =====================
 HTML_MAIN = """
 <!doctype html>
@@ -53,7 +56,7 @@ input { width:100%; padding:14px; font-size:18px }
 """
 
 # =====================
-# 漲價查價介面
+# 漲價查詢頁面 HTML
 # =====================
 HTML_UP = """
 <!doctype html>
@@ -95,7 +98,7 @@ body { font-family: Arial; background:#fdf2f2; padding:10px }
 """
 
 # =====================
-# Excel 讀取函數
+# 讀取 Excel
 # =====================
 def load_excel():
     if not os.path.exists(EXCEL_FILE):
@@ -106,7 +109,7 @@ def load_excel():
     return latest, up
 
 # =====================
-# 主查價路由
+# 主頁路由
 # =====================
 @app.route("/")
 def index():
@@ -134,7 +137,7 @@ def show_up():
 
     if data:
         _, df_up = data
-        # 確保欄位名稱對應 HTML 模板
+        # 如果 Excel 有 "單價" 欄位，改名成最新進價
         if "單價" in df_up.columns:
             df_up = df_up.rename(columns={"單價": "最新進價"})
         rows = df_up.to_dict("records")
@@ -142,8 +145,14 @@ def show_up():
     return render_template_string(HTML_UP, rows=rows)
 
 # =====================
-# 啟動 Flask
+# 健康檢查路由（Render 專用）
+# =====================
+@app.route("/health")
+def health():
+    return "OK", 200
+
+# =====================
+# 本地開發用
 # =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
