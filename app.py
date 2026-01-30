@@ -7,7 +7,7 @@ app = Flask(__name__)
 EXCEL_FILE = "價格整理.xlsx"
 
 # =====================
-# 主查價介面（原樣保留）
+# 主查價介面
 # =====================
 HTML_MAIN = """
 <!doctype html>
@@ -78,8 +78,8 @@ body { font-family: Arial; background:#fdf2f2; padding:10px }
 {% for r in rows %}
 <div class="card">
   <div><b>{{ r["品項名稱"] }}</b>（{{ r["品項編號"] }}）</div>
-  <div>前次價格：{{ r["前次進價"] }}（{{ r["前次日期"] }}）</div>
-  <div class="warn">最新價格：{{ r["最新進價"] }}（{{ r["最新日期"] }}）</div>
+  <div>前次價格：{{ r.get("前次進價", "N/A") }}（{{ r.get("前次日期", "N/A") }}）</div>
+  <div class="warn">最新價格：{{ r.get("最新進價", "N/A") }}（{{ r.get("最新日期", "N/A") }}）</div>
 </div>
 {% endfor %}
 
@@ -94,6 +94,9 @@ body { font-family: Arial; background:#fdf2f2; padding:10px }
 </html>
 """
 
+# =====================
+# Excel 讀取函數
+# =====================
 def load_excel():
     if not os.path.exists(EXCEL_FILE):
         return None
@@ -102,6 +105,9 @@ def load_excel():
     up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
     return latest, up
 
+# =====================
+# 主查價路由
+# =====================
 @app.route("/")
 def index():
     q = request.args.get("q", "").strip()
@@ -118,19 +124,26 @@ def index():
 
     return render_template_string(HTML_MAIN, rows=rows, q=q)
 
+# =====================
+# 漲價查詢路由
+# =====================
 @app.route("/up")
-def up():
+def show_up():
     data = load_excel()
     rows = []
 
     if data:
-        _, up = data
-        rows = up.rename(columns={
-            "前次進價": "前次進價",
-            "單價": "最新進價"
-        }).to_dict("records")
+        _, df_up = data
+        # 確保欄位名稱對應 HTML 模板
+        if "單價" in df_up.columns:
+            df_up = df_up.rename(columns={"單價": "最新進價"})
+        rows = df_up.to_dict("records")
 
     return render_template_string(HTML_UP, rows=rows)
 
+# =====================
+# 啟動 Flask
+# =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
