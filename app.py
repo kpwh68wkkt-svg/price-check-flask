@@ -4,97 +4,151 @@ import os
 
 app = Flask(__name__)
 
-# ===== 基本設定 =====
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EXCEL_FILE = os.path.join(BASE_DIR, "價格整理.xlsx")
-SHEET_PRIORITY = [
-    "最新進價",
-    "平均進貨成本",
-    "年度進貨成本_年度",
-    "整理後明細"
-]
+EXCEL_FILE = "價格整理.xlsx"
 
 HTML = """
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
+<title>📦 金紙進貨查價</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>📱 進貨查價</title>
+
 <style>
-body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 16px; }
-input { width: 100%; font-size: 18px; padding: 10px; }
-table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-th, td { border-bottom: 1px solid #ccc; padding: 8px; text-align: left; }
-th { background: #f5f5f5; }
-small { color: #888; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
+  background:#f2f2f2;
+  margin:0;
+  padding:16px;
+}
+h2 {
+  margin:0 0 12px 0;
+}
+input {
+  width:100%;
+  padding:14px;
+  font-size:20px;
+  border-radius:10px;
+  border:1px solid #ccc;
+  box-sizing:border-box;
+}
+.card {
+  background:#fff;
+  border-radius:12px;
+  padding:14px;
+  margin-top:12px;
+  box-shadow:0 2px 6px rgba(0,0,0,.12);
+}
+.name {
+  font-size:18px;
+  font-weight:bold;
+}
+.code {
+  color:#666;
+  margin-top:2px;
+}
+.price {
+  font-size:24px;
+  font-weight:bold;
+  margin-top:8px;
+}
+.avg {
+  color:#444;
+  margin-top:4px;
+}
+.warn {
+  color:#c00;
+  font-weight:bold;
+  margin-top:6px;
+}
+.empty {
+  margin-top:20px;
+  color:#888;
+  text-align:center;
+}
 </style>
 </head>
+
 <body>
-<h2>📦 進貨查價</h2>
+
+<h2>📦 金紙進貨查價</h2>
+
 <form method="get">
-<input name="q" placeholder="輸入關鍵字，例如：錢 / 庫錢 / 壽金" value="{{q}}">
+  <input
+    name="q"
+    placeholder="輸入 品名 / 編號（例：金箔、香、庫錢）"
+    value="{{ q }}"
+    autofocus
+  >
 </form>
 
-{% if msg %}
-<p style="color:red">{{msg}}</p>
+{% if rows is not none and rows|length == 0 %}
+  <div class="empty">⚠ 查無資料</div>
 {% endif %}
 
-{% if data %}
-<table>
-<tr>
-{% for c in data[0].keys() %}
-<th>{{c}}</th>
+{% for _, r in rows.iterrows() %}
+<div class="card">
+  <div class="name">{{ r["品項名稱"] }}</div>
+  <div class="code">（{{ r["品項編號"] }}）</div>
+  <div class="price">最新進貨：${{ r["最新進貨成本"] }}</div>
+  <div class="avg">平均成本：${{ r["平均進貨成本"] }}</div>
+  {% if r["狀態"] %}
+    <div class="warn">{{ r["狀態"] }}</div>
+  {% endif %}
+</div>
 {% endfor %}
-</tr>
-{% for r in data %}
-<tr>
-{% for v in r.values() %}
-<td>{{v}}</td>
-{% endfor %}
-</tr>
-{% endfor %}
-</table>
-{% endif %}
 
-<small>資料來源：價格整理.xlsx</small>
 </body>
 </html>
 """
 
 def load_data():
     if not os.path.exists(EXCEL_FILE):
-        return None, "❌ 找不到 Excel：價格整理.xlsx"
+        return None
 
-    xls = pd.ExcelFile(EXCEL_FILE)
-    for sheet in SHEET_PRIORITY:
-        if sheet in xls.sheet_names:
-            df = pd.read_excel(EXCEL_FILE, sheet_name=sheet)
-            return df, None
+    latest = pd.read_excel(EXCEL_FILE, sheet_name="最新進貨成本")
+    avg = pd.read_excel(EXCEL_FILE, sheet_name="平均進貨成本")
+    up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
 
-    return None, "❌ 找不到可用的 Sheet"
+    df = latest.merge(
+        avg,
+        on=["品項編號", "品項名稱"],
+        how="left"
+    )
+
+    df["狀態"] = df["品項編號"].isin(up["品項編號"]).map(
+        lambda x: "⚠ 近期漲價" if x else ""
+    )
+
+    return df
+
+def search(df, keyword):
+    if not keyword:
+        return df
+
+    keyword = keyword.strip()
+
+    return df[
+        df["品項名稱"].astype(str).str.contains(keyword, na=False) |
+        df["品項編號"].astype(str).str.contains(keyword, na=False)
+    ]
 
 @app.route("/")
 def index():
-    q = request.args.get("q", "").strip()
-    df, err = load_data()
+    q = request.args.get("q", "")
+    df = load_data()
 
-    if err:
-        return render_template_string(HTML, q=q, msg=err, data=None)
+    if df is None:
+        return "❌ 找不到 Excel（價格整理.xlsx）"
 
-    if q:
-        mask = df.astype(str).apply(
-            lambda s: s.str.contains(q, case=False, na=False)
-        ).any(axis=1)
-        df = df[mask]
+    result = search(df, q)
 
-    if df.empty:
-        return render_template_string(HTML, q=q, msg="查無資料", data=None)
-
-    data = df.head(50).to_dict("records")
-    return render_template_string(HTML, q=q, data=data, msg=None)
+    return render_template_string(
+        HTML,
+        rows=result,
+        q=q
+    )
 
 if __name__ == "__main__":
     print("📱 手機查價啟動中…")
-    print("👉 同 Wi-Fi / 4G 都可（升級後）")
     app.run(host="0.0.0.0", port=5000)
