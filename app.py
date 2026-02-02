@@ -6,9 +6,9 @@ app = Flask(__name__)
 
 EXCEL_FILE = "價格整理.xlsx"
 
-# =====================
-# 主查價介面（完全保留）
-# =====================
+# =========================
+# 主查價介面（完全不動）
+# =========================
 HTML_MAIN = """
 <!doctype html>
 <html>
@@ -54,7 +54,6 @@ button {
 .price { font-size:28px; font-weight:bold; margin-top:6px; }
 .avg { font-size:20px; color:#555; }
 .warn { margin-top:6px; font-size:20px; color:red; font-weight:bold; }
-.link { margin-top:20px; font-size:20px; }
 </style>
 </head>
 <body>
@@ -81,17 +80,16 @@ button {
 </div>
 {% endfor %}
 
-<div class="link">
-  👉 <a href="/up">查看 📈 漲價查詢</a>
-</div>
+<hr>
+<a href="/up">📈 查看漲價紀錄</a>
 
 </body>
 </html>
 """
 
-# =====================
-# 漲價查詢介面（新頁面）
-# =====================
+# =========================
+# 漲價查詢介面（獨立頁面）
+# =========================
 HTML_UP = """
 <!doctype html>
 <html>
@@ -102,10 +100,9 @@ HTML_UP = """
 <style>
 body {
   font-family: Arial, "Microsoft JhengHei";
-  background:#fff3f3;
+  background:#fdf2f2;
   padding:16px;
 }
-h2 { font-size:28px; }
 .card {
   background:white;
   padding:18px;
@@ -113,44 +110,42 @@ h2 { font-size:28px; }
   border-radius:12px;
   box-shadow:0 4px 8px rgba(0,0,0,.15);
 }
-.name { font-size:24px; font-weight:bold; }
-.old { font-size:20px; color:#555; }
-.new { font-size:26px; color:red; font-weight:bold; margin-top:6px; }
+.name { font-size:22px; font-weight:bold; }
+.warn { color:red; font-size:22px; font-weight:bold; margin-top:6px; }
 </style>
 </head>
 <body>
 
-<h2>📈 漲價查詢</h2>
+<h2>📈 漲價紀錄查詢</h2>
 
 {% for r in rows %}
 <div class="card">
   <div class="name">{{ r["品項名稱"] }}（{{ r["品項編號"] }}）</div>
-  <div class="old">
+  <div>
     前次價格：${{ r["前次進價"] }}
-    （{{ r["前次日期"] }}）
+    （{{ r["前次進價日期"] or "—" }}）
   </div>
-  <div class="new">
+  <div class="warn">
     最新價格：${{ r["最新進價"] }}
-    （{{ r["最新日期"] }}）
+    （{{ r["最新進價日期"] or "—" }}）
   </div>
 </div>
 {% endfor %}
 
 {% if rows|length == 0 %}
-<p style="font-size:20px;">🎉 目前沒有漲價商品</p>
+<p>🎉 目前沒有漲價項目</p>
 {% endif %}
 
-<p style="font-size:20px;">
-  ⬅ <a href="/">回主查價</a>
-</p>
+<hr>
+<a href="/">⬅ 回查價</a>
 
 </body>
 </html>
 """
 
-# =====================
-# 共用資料讀取
-# =====================
+# =========================
+# 資料讀取
+# =========================
 def load_data():
     if not os.path.exists(EXCEL_FILE):
         return None, None, "❌ 找不到 Excel（價格整理.xlsx）"
@@ -171,9 +166,9 @@ def load_data():
 
     return df, up, None
 
-# =====================
-# 主查價頁 /
-# =====================
+# =========================
+# 主查價
+# =========================
 @app.route("/")
 def index():
     q = request.args.get("q", "").strip()
@@ -182,39 +177,32 @@ def index():
     if df is None:
         return render_template_string(HTML_MAIN, rows=[], q=q, error=error)
 
-    if q == "":
-        rows = df
-    else:
-        rows = df[
+    if q:
+        df = df[
             df["品項名稱"].astype(str).str.contains(q, na=False, regex=False) |
             df["品項編號"].astype(str).str.contains(q, na=False, regex=False)
         ]
 
-    return render_template_string(
-        HTML_MAIN,
-        rows=rows,
-        q=q,
-        error=None if len(rows) else "⚠ 查無資料"
-    )
+    return render_template_string(HTML_MAIN, rows=df, q=q, error=None)
 
-# =====================
-# 漲價查詢頁 /up
-# =====================
+# =========================
+# 漲價頁面
+# =========================
 @app.route("/up")
-def up():
-    _, up_df, error = load_data()
+def up_page():
+    _, up, error = load_data()
 
-    if up_df is None:
+    if up is None:
         return render_template_string(HTML_UP, rows=[])
 
-    rows = up_df.rename(columns={
-        "前次進價": "前次進價",
-        "單價": "最新進價"
-    }).to_dict("records")
-
+    rows = up.to_dict("records")
     return render_template_string(HTML_UP, rows=rows)
 
-# =====================
+# =========================
+# 啟動
+# =========================
 if __name__ == "__main__":
     print("📱 手機查價啟動中…")
     app.run(host="0.0.0.0", port=5000)
+
+
