@@ -1,210 +1,208 @@
-# ================= 金紙進貨整理＿最終穩定完整版（含漲價日期補 "-"） =================
-# 功能：
-# - 支援 raw / raw_YYYY 多年度
-# - 支援退貨（負數）
-# - 整理後明細 / 退貨明細
-# - 最新進價
-# - 平均進貨成本
-# - 年度進貨成本（年度 / 區間）
-# - 漲價提醒（有漲就提醒，含日期）
-# - 連續漲價提醒（連 2 次以上，含日期）
-# - LINE CSV / LINE PDF
-# ================================================================
-
+from flask import Flask, request, render_template_string
 import pandas as pd
-import re, os
-from datetime import datetime
-from openpyxl.utils import get_column_letter
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
-from reportlab.lib import colors
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+import os
 
-# ================= 基本設定 =================
-INPUT_FILE = "進貨明細.xlsx"
-OUT_EXCEL = "價格整理.xlsx"
-OUT_LINE_CSV = "LINE_查價表.csv"
-OUT_LINE_SINGLE_CSV = "LINE_查價_單品快速.csv"
-OUT_LINE_PDF = "LINE_查價表.pdf"
-FONT = "msjh.ttf"
+app = Flask(__name__)
 
-# ================= Excel 欄寬 =================
-def auto_adjust(ws):
-    for col in ws.columns:
-        max_len = 10
-        col_letter = get_column_letter(col[0].column)
-        for cell in col:
-            if cell.value:
-                t = str(cell.value)
-                ln = sum(2 if '\u4e00' <= c <= '\u9fff' else 1 for c in t)
-                max_len = max(max_len, ln + 2)
-        ws.column_dimensions[col_letter].width = max_len
+EXCEL_FILE = "價格整理.xlsx"
 
-# ================= 讀取所有 raw / raw_YYYY =================
-xls = pd.ExcelFile(INPUT_FILE)
-raw_sheets = [s for s in xls.sheet_names if s.lower() == "raw" or s.lower().startswith("raw_")]
+# =========================
+# 主查價介面（完全不動）
+# =========================
+HTML_MAIN = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>📱 金紙進貨查價</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body {
+  font-family: Arial, "Microsoft JhengHei";
+  background:#f0f0f0;
+  padding:16px;
+}
+h2 { font-size:28px; }
+form {
+  display:flex;
+  gap:10px;
+  margin-bottom:16px;
+}
+input {
+  flex:1;
+  padding:14px;
+  font-size:22px;
+  border-radius:8px;
+  border:1px solid #ccc;
+}
+button {
+  padding:14px 20px;
+  font-size:20px;
+  border:none;
+  border-radius:8px;
+  background:#007bff;
+  color:white;
+}
+.card {
+  background:white;
+  padding:18px;
+  margin-bottom:16px;
+  border-radius:12px;
+  box-shadow:0 4px 8px rgba(0,0,0,.15);
+}
+.name { font-size:24px; font-weight:bold; }
+.price { font-size:28px; font-weight:bold; margin-top:6px; }
+.avg { font-size:20px; color:#555; }
+.warn { margin-top:6px; font-size:20px; color:red; font-weight:bold; }
+</style>
+</head>
+<body>
 
-rows = []
-for sheet in raw_sheets:
-    # 為避免多欄出現錯誤，只取第一欄
-    raw = pd.read_excel(INPUT_FILE, sheet_name=sheet, header=None, usecols=[0])
-    raw.columns = ["raw"]
+<h2>📦 金紙進貨查價</h2>
 
-    if raw.empty:
-        continue
+<form method="get">
+  <input name="q" placeholder="輸入 品名 / 編號（例：庫錢、壽金、香）" value="{{ q }}">
+  <button type="submit">查詢</button>
+</form>
 
-    for line in raw["raw"].dropna():
-        p = str(line).split()
-        if len(p) < 6:
-            continue
+{% if error %}
+<p style="color:red; font-size:20px;">{{ error }}</p>
+{% endif %}
 
-        d = p[0]
-        if re.match(r"\d{3}/\d+/\d+", d):
-            y,m,dd = d.split("/")
-            dt = datetime(int(y)+1911, int(m), int(dd))
-        elif re.match(r"\d{4}/\d+/\d+", d):
-            y,m,dd = d.split("/")
-            dt = datetime(int(y), int(m), int(dd))
-        else:
-            continue
+{% for _, r in rows.iterrows() %}
+<div class="card">
+  <div class="name">{{ r["品項名稱"] }}（{{ r["品項編號"] }}）</div>
+  <div class="price">最新進貨：${{ r["最新進貨成本"] }}</div>
+  <div class="avg">平均成本：${{ r["平均進貨成本"] }}</div>
+  {% if r["狀態"] %}
+    <div class="warn">{{ r["狀態"] }}</div>
+  {% endif %}
+</div>
+{% endfor %}
 
-        code = p[1]
-        qty_unit = p[-3]
-        price = float(p[-2])
+<hr>
+<a href="/up">📈 查看漲價紀錄</a>
 
-        q = re.search(r"-?\d+", qty_unit)
-        u = re.search(r"[\u4e00-\u9fff]+", qty_unit)
-        if not q:
-            continue
+</body>
+</html>
+"""
 
-        qty = int(q.group())
-        amount = float(p[-1]) * (-1 if qty < 0 else 1)
-        name = "".join(p[2:-3])
+# =========================
+# 漲價查詢介面（獨立頁面）
+# =========================
+HTML_UP = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>📈 漲價查詢</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body {
+  font-family: Arial, "Microsoft JhengHei";
+  background:#fdf2f2;
+  padding:16px;
+}
+.card {
+  background:white;
+  padding:18px;
+  margin-bottom:16px;
+  border-radius:12px;
+  box-shadow:0 4px 8px rgba(0,0,0,.15);
+}
+.name { font-size:22px; font-weight:bold; }
+.warn { color:red; font-size:22px; font-weight:bold; margin-top:6px; }
+</style>
+</head>
+<body>
 
-        rows.append([
-            dt, dt.strftime("%Y/%m/%d"), dt.year,
-            code, name, qty, u.group() if u else "",
-            price, amount
-        ])
+<h2>📈 漲價紀錄查詢</h2>
 
-df = pd.DataFrame(rows, columns=[
-    "日期_dt","日期","年度","品項編號","品項名稱",
-    "數量","單位","單價","金額"
-]).sort_values("日期_dt").reset_index(drop=True)
+{% for r in rows %}
+<div class="card">
+  <div class="name">{{ r["品項名稱"] }}（{{ r["品項編號"] }}）</div>
+  <div>
+    前次價格：${{ r["前次進價"] }}
+    （{{ r["前次進價日期"] or "—" }}）
+  </div>
+  <div class="warn">
+    最新價格：${{ r["最新進價"] }}
+    （{{ r["最新進價日期"] or "—" }}）
+  </div>
+</div>
+{% endfor %}
 
-# ================= 最新進價（排除退貨） =================
-latest = (
-    df[df["數量"] > 0]
-    .groupby("品項編號", as_index=False)
-    .last()[["品項編號","品項名稱","單價","日期"]]
-)
-latest.columns = ["品項編號","品項名稱","最新進價","最新進貨日"]
-latest["最新進價_num"] = latest["最新進價"].round(0).astype(int)
+{% if rows|length == 0 %}
+<p>🎉 目前沒有漲價項目</p>
+{% endif %}
 
-# ================= 平均進貨成本 =================
-avg_cost = (
-    df.groupby("品項編號", as_index=False)
-    .apply(lambda g: pd.Series({
-        "品項名稱": g["品項名稱"].iloc[-1],
-        "平均進貨成本": (
-            (g["單價"] * g["數量"]).sum() / g["數量"].sum()
-            if g["數量"].sum() != 0 else 0
-        )
-    }))
-    .reset_index(drop=True)
-)
-avg_cost["平均進貨成本"] = avg_cost["平均進貨成本"].round(0).astype(int)
+<hr>
+<a href="/">⬅ 回查價</a>
 
-# ================= 年度進貨成本 =================
-year_cost = (
-    df.groupby(["年度","品項編號"], as_index=False)
-    .apply(lambda g: pd.Series({
-        "品項名稱": g["品項名稱"].iloc[-1],
-        "年度進貨成本": (
-            (g["單價"] * g["數量"]).sum() / g["數量"].sum()
-            if g["數量"].sum() != 0 else 0
-        )
-    }))
-    .reset_index(drop=True)
-)
-year_cost["年度進貨成本"] = year_cost["年度進貨成本"].round(0).astype(int)
+</body>
+</html>
+"""
 
-# ================= 漲價提醒（含前次日期 / 最新日期，空補 "-"） =================
-up_rows, seq_rows = [], []
-for code, g in df[df["數量"] > 0].groupby("品項編號"):
-    g = g.sort_values("日期_dt")
-    
-    # 單次漲價
-    if len(g) >= 2:
-        p1, d1 = g.iloc[-2]["單價"], g.iloc[-2]["日期"]
-        p2, d2 = g.iloc[-1]["單價"], g.iloc[-1]["日期"]
-        if p2 > p1:
-            up_rows.append([
-                code,
-                g.iloc[-1]["品項名稱"],
-                f"${int(p1)}", d1 if d1 else "-",
-                f"${int(p2)}", d2 if d2 else "-"
-            ])
-    
-    # 連續漲價（第一次、第二次、最新）
-    if len(g) >= 3:
-        p1, p2, p3 = g.iloc[-3]["單價"], g.iloc[-2]["單價"], g.iloc[-1]["單價"]
-        d1, d2, d3 = g.iloc[-3]["日期"], g.iloc[-2]["日期"], g.iloc[-1]["日期"]
-        if p2 > p1 and p3 > p2:
-            seq_rows.append([
-                code,
-                g.iloc[-1]["品項名稱"],
-                f"${int(p1)}", d1 if d1 else "-",
-                f"${int(p2)}", d2 if d2 else "-",
-                f"${int(p3)}", d3 if d3 else "-"
-            ])
+# =========================
+# 資料讀取
+# =========================
+def load_data():
+    if not os.path.exists(EXCEL_FILE):
+        return None, None, "❌ 找不到 Excel（價格整理.xlsx）"
 
-df_up = pd.DataFrame(up_rows, columns=[
-    "品項編號","品項名稱","前次進價","前次日期","最新進價","最新日期"
-])
+    latest = pd.read_excel(EXCEL_FILE, sheet_name="最新進貨成本")
+    avg = pd.read_excel(EXCEL_FILE, sheet_name="平均進貨成本")
+    up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
 
-df_seq = pd.DataFrame(seq_rows, columns=[
-    "品項編號","品項名稱",
-    "第一次漲價","第一次日期",
-    "第二次漲價","第二次日期",
-    "最新進價","最新日期"
-])
+    df = latest.merge(
+        avg,
+        on=["品項編號", "品項名稱"],
+        how="left"
+    )
 
-# ================= Excel 輸出 =================
-with pd.ExcelWriter(OUT_EXCEL, engine="openpyxl") as writer:
-    df_fmt = df.copy()
-    df_fmt["單價"] = df_fmt["單價"].round(0).astype(int).astype(str).radd("$")
-    df_fmt["金額"] = df_fmt["金額"].round(0).astype(int).astype(str).radd("$")
-    df_fmt.drop(columns="日期_dt").to_excel(writer, sheet_name="整理後明細", index=False)
+    df["狀態"] = df["品項編號"].isin(up["品項編號"]).map(
+        lambda x: "⚠ 近期漲價" if x else ""
+    )
 
-    df[df["數量"] < 0].drop(columns="日期_dt").to_excel(writer, sheet_name="退貨明細", index=False)
-    latest.drop(columns="最新進價_num").to_excel(writer, sheet_name="最新進價", index=False)
-    avg_cost.to_excel(writer, sheet_name="平均進貨成本", index=False)
-    year_cost.to_excel(writer, sheet_name="年度進貨成本", index=False)
-    df_up.to_excel(writer, sheet_name="漲價提醒", index=False)
-    df_seq.to_excel(writer, sheet_name="連續漲價提醒", index=False)
+    return df, up, None
 
-    for ws in writer.book.worksheets:
-        auto_adjust(ws)
+# =========================
+# 主查價
+# =========================
+@app.route("/")
+def index():
+    q = request.args.get("q", "").strip()
+    df, _, error = load_data()
 
-# ================= LINE CSV =================
-latest.drop(columns="最新進價_num").to_csv(OUT_LINE_CSV, index=False, encoding="utf-8-sig")
-latest.drop(columns="最新進價_num").to_csv(OUT_LINE_SINGLE_CSV, index=False, encoding="utf-8-sig")
+    if df is None:
+        return render_template_string(HTML_MAIN, rows=[], q=q, error=error)
 
-# ================= LINE PDF =================
-pdfmetrics.registerFont(TTFont("MSJH", FONT))
-if os.path.exists(OUT_LINE_PDF):
-    os.remove(OUT_LINE_PDF)
+    if q:
+        df = df[
+            df["品項名稱"].astype(str).str.contains(q, na=False, regex=False) |
+            df["品項編號"].astype(str).str.contains(q, na=False, regex=False)
+        ]
 
-pdf = SimpleDocTemplate(OUT_LINE_PDF, pagesize=A4)
-pdf_data = [latest.drop(columns="最新進價_num").columns.tolist()] + latest.drop(columns="最新進價_num").values.tolist()
-table = Table(pdf_data, repeatRows=1)
-table.setStyle(TableStyle([
-    ('GRID',(0,0),(-1,-1),0.5,colors.black),
-    ('FONTNAME',(0,0),(-1,-1),'MSJH'),
-    ('BACKGROUND',(0,0),(-1,0),colors.lightgrey)
-]))
-pdf.build([table])
+    return render_template_string(HTML_MAIN, rows=df, q=q, error=None)
 
-print("✅ 最終穩定完整版完成（漲價日期補 '-'）")
+# =========================
+# 漲價頁面
+# =========================
+@app.route("/up")
+def up_page():
+    _, up, error = load_data()
+
+    if up is None:
+        return render_template_string(HTML_UP, rows=[])
+
+    rows = up.to_dict("records")
+    return render_template_string(HTML_UP, rows=rows)
+
+# =========================
+# 啟動
+# =========================
+if __name__ == "__main__":
+    print("📱 手機查價啟動中…")
+    app.run(host="0.0.0.0", port=5000)
+
+
