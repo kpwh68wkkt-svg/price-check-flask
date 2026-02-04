@@ -27,31 +27,31 @@ h2 {
   align-items:center;
 }
 
-a.up {
-  font-size:18px;
+a {
   text-decoration:none;
   color:#d60000;
+  font-size:18px;
   font-weight:bold;
 }
 
 form {
   display:flex;
-  flex-wrap:wrap;
   gap:10px;
   margin-bottom:16px;
+  flex-wrap:wrap;
 }
 
 input {
   flex:1;
   padding:14px;
-  font-size:22px;
+  font-size:20px;
   border-radius:8px;
   border:1px solid #ccc;
 }
 
 button {
   padding:14px 20px;
-  font-size:20px;
+  font-size:18px;
   border:none;
   border-radius:8px;
   background:#007bff;
@@ -82,11 +82,11 @@ button {
   color:#555;
 }
 
-.warn a {
+.warn {
+  margin-top:6px;
+  font-size:20px;
   color:red;
   font-weight:bold;
-  font-size:20px;
-  text-decoration:none;
 }
 </style>
 </head>
@@ -94,13 +94,13 @@ button {
 
 <h2>
   📦 金紙進貨查價
-  <a class="up" href="/up">📈 漲價</a>
+  <a href="/up">📈 漲價提醒</a>
 </h2>
 
 <form method="get">
-  <input name="q" placeholder="輸入 品名 / 編號" value="{{ q }}">
-  <input type="date" name="start" value="{{ start }}">
-  <input type="date" name="end" value="{{ end }}">
+  <input name="q" placeholder="品名 / 編號" value="{{ q }}">
+  <input type="date" name="start_date" value="{{ start_date }}">
+  <input type="date" name="end_date" value="{{ end_date }}">
   <button type="submit">查詢</button>
 </form>
 
@@ -113,11 +113,10 @@ button {
   <div class="name">{{ r["品項名稱"] }}（{{ r["品項編號"] }}）</div>
   <div class="price">最新進貨：${{ r["最新進貨成本"] }}</div>
   <div class="avg">平均成本：${{ r["平均進貨成本"] }}</div>
-
   {% if r["狀態"] %}
-  <div class="warn">
-    <a href="/up">{{ r["狀態"] }}</a>
-  </div>
+    <div class="warn">
+      <a href="/up">⚠ 近期漲價</a>
+    </div>
   {% endif %}
 </div>
 {% endfor %}
@@ -126,7 +125,7 @@ button {
 </html>
 """
 
-UP_HTML = """
+HTML_UP = """
 <!doctype html>
 <html>
 <head>
@@ -136,22 +135,20 @@ UP_HTML = """
 <style>
 body {
   font-family: Arial, "Microsoft JhengHei";
-  background:#f5f5f5;
+  background:#fdf2f2;
   padding:16px;
 }
 .card {
   background:white;
-  padding:16px;
-  margin-bottom:14px;
-  border-radius:10px;
+  padding:18px;
+  margin-bottom:16px;
+  border-radius:12px;
+  box-shadow:0 4px 8px rgba(0,0,0,.2);
 }
-.name {
-  font-size:22px;
-  font-weight:bold;
-}
-.price {
+.warn {
+  color:red;
   font-size:20px;
-  color:#d60000;
+  font-weight:bold;
 }
 </style>
 </head>
@@ -159,15 +156,19 @@ body {
 
 <h2>📈 漲價提醒</h2>
 
-{% for _, r in rows.iterrows() %}
+{% for r in rows %}
 <div class="card">
-  <div class="name">{{ r["品項名稱"] }}（{{ r["品項編號"] }}）</div>
-  <div class="price">
-    前次價格：${{ r["前次進價"] }}（—）<br>
-    最新價格：${{ r["最新進價"] }}（{{ r["日期"] or "—" }}）
-  </div>
+  <div><b>{{ r["品項名稱"] }}</b>（{{ r["品項編號"] }}）</div>
+  <div>前次價格：${{ r["前次進價"] }}（{{ r["前次進價日期"] }}）</div>
+  <div class="warn">最新價格：${{ r["最新進價"] }}（{{ r["最新進價日期"] }}）</div>
 </div>
 {% endfor %}
+
+{% if rows|length == 0 %}
+<p>🎉 目前沒有漲價項目</p>
+{% endif %}
+
+<a href="/">⬅ 回查價</a>
 
 </body>
 </html>
@@ -175,56 +176,58 @@ body {
 
 def load_data():
     if not os.path.exists(EXCEL_FILE):
-        return None, "❌ 找不到 Excel（價格整理.xlsx）"
+        return None, None, "❌ 找不到 Excel（價格整理.xlsx）"
 
     latest = pd.read_excel(EXCEL_FILE, sheet_name="最新進貨成本")
     avg = pd.read_excel(EXCEL_FILE, sheet_name="平均進貨成本")
     up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
+    detail = pd.read_excel(EXCEL_FILE, sheet_name="整理後明細")
 
-    df = latest.merge(
-        avg,
-        on=["品項編號", "品項名稱"],
-        how="left"
-    )
-
+    df = latest.merge(avg, on=["品項編號", "品項名稱"], how="left")
     df["狀態"] = df["品項編號"].isin(up["品項編號"]).map(
         lambda x: "⚠ 近期漲價" if x else ""
     )
 
-    return df, None
+    return df, detail, None
 
 @app.route("/")
 def index():
     q = request.args.get("q", "").strip()
-    start = request.args.get("start", "")
-    end = request.args.get("end", "")
+    start_date = request.args.get("start_date", "")
+    end_date = request.args.get("end_date", "")
 
-    df, error = load_data()
-
+    df, detail, error = load_data()
     if df is None:
-        return render_template_string(HTML, rows=[], q=q, start=start, end=end, error=error)
+        return render_template_string(HTML, rows=[], q=q, error=error)
+
+    if start_date or end_date:
+        detail["日期"] = pd.to_datetime(detail["日期"])
+        if start_date:
+            detail = detail[detail["日期"] >= pd.to_datetime(start_date)]
+        if end_date:
+            detail = detail[detail["日期"] <= pd.to_datetime(end_date)]
+        codes = detail["品項編號"].unique()
+        df = df[df["品項編號"].isin(codes)]
 
     if q:
         df = df[
-            df["品項名稱"].astype(str).str.contains(q, na=False) |
-            df["品項編號"].astype(str).str.contains(q, na=False)
+            df["品項名稱"].astype(str).str.contains(q, na=False, regex=False) |
+            df["品項編號"].astype(str).str.contains(q, na=False, regex=False)
         ]
 
     return render_template_string(
         HTML,
         rows=df,
         q=q,
-        start=start,
-        end=end,
+        start_date=start_date,
+        end_date=end_date,
         error=None
     )
 
 @app.route("/up")
-def up():
-    df = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
-    return render_template_string(UP_HTML, rows=df)
+def up_page():
+    up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
+    return render_template_string(HTML_UP, rows=up.to_dict("records"))
 
 if __name__ == "__main__":
-    print("📱 手機查價啟動中…")
     app.run(host="0.0.0.0", port=5000)
-
