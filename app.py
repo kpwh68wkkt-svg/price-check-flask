@@ -20,7 +20,7 @@ HTML = """
   <input name="q" placeholder="輸入品項名稱" value="{{ q }}">
   <br><br>
 
-  📅 日期查詢（可查單日或期間）<br>
+  📅 日期彙總查詢<br>
   <input type="date" name="start" value="{{ start }}">
   ～ 
   <input type="date" name="end" value="{{ end }}">
@@ -43,24 +43,17 @@ HTML = """
 </ul>
 {% endif %}
 
-{% if detail_rows %}
-<h3>📦 進貨明細</h3>
+{% if summary_rows %}
+<h3>📊 期間進貨彙總</h3>
 <ul>
-{% for r in detail_rows %}
+{% for r in summary_rows %}
   <li>
-    {{ r["日期"] }}　
     {{ r["品項名稱"] }}　
-    {{ r["數量"] }}　
-    ${{ r["單價"] }}
+    共 {{ r["總數量"] }}　
+    ${{ r["總金額"] }}
   </li>
 {% endfor %}
 </ul>
-{% endif %}
-
-{% if q or start %}
-  {% if not price_rows and not detail_rows %}
-    <p>❌ 查無資料</p>
-  {% endif %}
 {% endif %}
 """
 
@@ -71,27 +64,31 @@ def index():
     end = request.args.get("end", "")
 
     price_rows = []
-    detail_rows = []
+    summary_rows = []
 
     if not os.path.exists(EXCEL_FILE):
         return "❌ 找不到 Excel"
 
-    # 品項查詢（最新進貨成本）
     if q:
         df_price = pd.read_excel(EXCEL_FILE, sheet_name=SHEET_MAIN)
         mask = df_price["品項名稱"].astype(str).str.contains(q, case=False, na=False)
         price_rows = df_price[mask].to_dict("records")
 
-    # 日期查詢（進貨明細）
     if start:
-        df_detail = pd.read_excel(EXCEL_FILE, sheet_name=SHEET_DETAIL)
-        df_detail["日期_dt"] = pd.to_datetime(df_detail["日期"])
+        df = pd.read_excel(EXCEL_FILE, sheet_name=SHEET_DETAIL)
+        df["日期_dt"] = pd.to_datetime(df["日期"])
 
         s = pd.to_datetime(start)
         e = pd.to_datetime(end) if end else s
 
-        df_f = df_detail[(df_detail["日期_dt"] >= s) & (df_detail["日期_dt"] <= e)]
-        detail_rows = df_f.sort_values("日期_dt").to_dict("records")
+        df = df[(df["日期_dt"] >= s) & (df["日期_dt"] <= e)]
+
+        summary = (
+            df.groupby("品項名稱", as_index=False)
+              .agg(總數量=("數量", "sum"), 總金額=("金額", "sum"))
+        )
+
+        summary_rows = summary.to_dict("records")
 
     return render_template_string(
         HTML,
@@ -99,7 +96,7 @@ def index():
         start=start,
         end=end,
         price_rows=price_rows,
-        detail_rows=detail_rows
+        summary_rows=summary_rows
     )
 
 if __name__ == "__main__":
