@@ -1,108 +1,81 @@
-from flask import Flask, request, render_template_string, redirect, url_for
+# 變動說明：
+# 1. 新增 parse_date_range() 支援 2026/2/1-2026/2/28、2026-02-01~2026-02-28
+# 2. 修正區間查詢為「含起訖日」
+# 3. history 顯示改為進貨單格式：數量/單價/總價 對齊
+# 4. 標題加入返回主頁
+
+from flask import Flask, request, render_template_string
 import pandas as pd
-import os
+import os, re
 
 app = Flask(__name__)
 EXCEL_FILE = "價格整理.xlsx"
 
-# ===================== 主畫面 =====================
-MAIN_HTML = """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>📱 金紙進貨查價</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:Arial,\"Microsoft JhengHei\";background:#f0f0f0;padding:16px}
-h2{font-size:28px}
-a.link{font-size:18px;margin-left:10px}
-form{display:flex;gap:10px;margin-bottom:16px}
-input{flex:1;padding:14px;font-size:22px;border-radius:8px;border:1px solid #ccc}
-button{padding:14px 20px;font-size:20px;border:none;border-radius:8px;background:#007bff;color:white}
-.card{background:white;padding:18px;margin-bottom:16px;border-radius:12px;box-shadow:0 4px 8px rgba(0,0,0,.15)}
-.name{font-size:24px;font-weight:bold}
-.price{font-size:28px;font-weight:bold;margin-top:6px}
-.avg{font-size:20px;color:#555}
-.warn{margin-top:6px;font-size:20px;color:red;font-weight:bold}
-</style>
-</head>
-<body>
-<h2>📦 金紙進貨查價 <a class="link" href="/up">📈 漲價提醒</a> <a class="link" href="/history">📜 進貨紀錄</a></h2>
-<form method="get">
-<input name="q" placeholder="輸入 品名 / 編號" value="{{ q }}">
-<button type="submit">查詢</button>
+# ---------- 日期解析 ----------
+
+def parse_date_range(text):
+    if not text: return None, None
+    text = text.replace("~","-")
+    m = re.match(r"(\d{4}[/-]\d{1,2}[/-]\d{1,2})-(\d{4}[/-]\d{1,2}[/-]\d{1,2})", text)
+    if not m: return None, None
+    start = pd.to_datetime(m.group(1), errors="coerce")
+    end = pd.to_datetime(m.group(2), errors="coerce")
+    if pd.isna(start) or pd.isna(end): return None, None
+    return start.normalize(), end.normalize()
+
+# ---------- 主畫面 ----------
+HTML_INDEX = """
+<h2>📦 金紙進貨查價 <a href='/up'>📈漲價</a> | <a href='/history'>📜區間查詢</a></h2>
+<form method=get>
+<input name=q value='{{q}}'>
+<button>查詢</button>
 </form>
-{% if error %}<p style="color:red;font-size:20px;">{{ error }}</p>{% endif %}
-{% for _, r in rows.iterrows() %}
-<div class="card">
-<div class="name">{{ r['品項名稱'] }}（{{ r['品項編號'] }}）</div>
-<div class="price">最新進貨：${{ r['最新進貨成本'] }}</div>
-<div class="avg">平均成本：${{ r['平均進貨成本'] }}</div>
-{% if r['狀態'] %}<div class="warn"><a href="/up" style="color:red;text-decoration:none">⚠ 近期漲價</a></div>{% endif %}
+{% for _,r in rows.iterrows() %}
+<div style='border:1px solid #ccc;margin:8px;padding:8px'>
+<b>{{r['品項名稱']}}({{r['品項編號']}})</b><br>
+最新：${{r['最新進貨成本']}}<br>
+平均：${{r['平均進貨成本']}}<br>
+{% if r['狀態'] %}<a href='/up' style='color:red'>⚠ 近期漲價</a>{% endif %}
 </div>
 {% endfor %}
-</body></html>
 """
 
-# ===================== 漲價頁 =====================
-UP_HTML = """
-<!doctype html><html><head><meta charset="utf-8">
-<title>漲價提醒</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:Arial,\"Microsoft JhengHei\";background:#f5f5f5;padding:16px}
-.card{background:white;padding:16px;margin-bottom:14px;border-radius:12px;box-shadow:0 3px 8px rgba(0,0,0,.15)}
-h2{font-size:26px}
-a{margin-left:10px}
-.name{font-size:22px;font-weight:bold}
-.warn{color:red;font-weight:bold;font-size:20px}
-</style></head><body>
-<h2>📈 漲價提醒 <a href="/">返回主頁</a></h2>
-{% for _, r in rows.iterrows() %}
-<div class="card">
-<div class="name">{{ r['品項名稱'] }}（{{ r['品項編號'] }}）</div>
-<div>前次價格：${{ r['前次進價'] }}（{{ r.get('前次進價日期','—') }}）</div>
-<div class="warn">最新價格：${{ r['最新進價'] }}（{{ r.get('最新進價日期','—') }}）</div>
-</div>
-{% endfor %}
-</body></html>
-"""
-
-# ===================== 歷史紀錄 =====================
-HISTORY_HTML = """
-<!doctype html><html><head><meta charset="utf-8">
-<title>進貨紀錄</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:Arial,\"Microsoft JhengHei\";background:#fafafa;padding:16px}
-h2{font-size:26px}
-table{width:100%;border-collapse:collapse;background:white}
-th,td{border:1px solid #ccc;padding:8px;text-align:center}
-th{background:#eee}
-.right{text-align:right}
-</style></head><body>
-<h2>📜 進貨紀錄 <a href="/">返回主頁</a></h2>
-<form method="get">起：<input type="date" name="start"> 迄：<input type="date" name="end"><button>查詢</button></form>
-<table>
-<tr><th>日期</th><th>編號</th><th>名稱</th><th>數量</th><th>單價</th><th>總價</th></tr>
-{% for _, r in rows.iterrows() %}
+# ---------- 歷史 ----------
+HTML_HISTORY = """
+<h2>📜 進貨明細 <a href='/'>返回主頁</a></h2>
+<form>
+<input name=range placeholder='2026/2/1-2026/2/28' value='{{range}}'>
+<button>查詢</button>
+</form>
+<table border=1 cellpadding=6>
+<tr><th>日期</th><th>品項</th><th>數量</th><th>單價</th><th>總價</th></tr>
+{% for _,r in rows.iterrows() %}
 <tr>
-<td>{{ r['日期'] }}</td>
-<td>{{ r['品項編號'] }}</td>
-<td style="text-align:left">{{ r['品項名稱'] }}</td>
-<td class="right">{{ r['數量'] }}</td>
-<td class="right">{{ r['單價'] }}</td>
-<td class="right">{{ r['金額'] }}</td>
+<td>{{r['日期'].date()}}</td>
+<td>{{r['品項名稱']}}</td>
+<td align=right>{{r['數量']}}</td>
+<td align=right>{{r['單價']}}</td>
+<td align=right>{{r['總價']}}</td>
 </tr>
 {% endfor %}
 </table>
-</body></html>
 """
 
-# ===================== 資料讀取 =====================
+# ---------- 漲價 ----------
+HTML_UP = """
+<h2>📈 漲價提醒 <a href='/'>返回主頁</a></h2>
+{% for _,r in rows.iterrows() %}
+<div style='margin:8px'>
+<b>{{r['品項名稱']}}({{r['品項編號']}})</b><br>
+前次：${{r['前次價格']}}（{{r['前次日期']}}）<br>
+最新：${{r['最新價格']}}（{{r['最新日期']}}）
+</div>
+{% endfor %}
+"""
 
-def load_main():
+# ---------- 資料 ----------
+
+def load_base():
     latest = pd.read_excel(EXCEL_FILE, sheet_name="最新進貨成本")
     avg = pd.read_excel(EXCEL_FILE, sheet_name="平均進貨成本")
     up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
@@ -112,24 +85,27 @@ def load_main():
 
 @app.route('/')
 def index():
-    q=request.args.get('q','').strip()
-    df=load_main()
-    if q: df=df[df['品項名稱'].astype(str).str.contains(q)|df['品項編號'].astype(str).str.contains(q)]
-    return render_template_string(MAIN_HTML,rows=df,q=q,error=None)
+    q=request.args.get('q','')
+    df=load_base()
+    if q:
+        df=df[df['品項名稱'].astype(str).str.contains(q,regex=False)|df['品項編號'].astype(str).str.contains(q,regex=False)]
+    return render_template_string(HTML_INDEX,rows=df,q=q)
+
+@app.route('/history')
+def history():
+    rng=request.args.get('range','')
+    df=pd.read_excel(EXCEL_FILE,sheet_name='進貨明細')
+    df['日期']=pd.to_datetime(df['日期'],errors='coerce')
+    start,end=parse_date_range(rng)
+    if start is not None:
+        df=df[(df['日期']>=start)&(df['日期']<=end)]
+    df['總價']=df['數量']*df['單價']
+    return render_template_string(HTML_HISTORY,rows=df.sort_values('日期'),range=rng)
 
 @app.route('/up')
 def up():
     df=pd.read_excel(EXCEL_FILE,sheet_name='漲價提醒')
-    return render_template_string(UP_HTML,rows=df)
-
-@app.route('/history')
-def history():
-    df=pd.read_excel(EXCEL_FILE,sheet_name='整理後明細')
-    s=request.args.get('start')
-    e=request.args.get('end')
-    if s: df=df[df['日期']>=s]
-    if e: df=df[df['日期']<=e]
-    return render_template_string(HISTORY_HTML,rows=df)
+    return render_template_string(HTML_UP,rows=df)
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000)
