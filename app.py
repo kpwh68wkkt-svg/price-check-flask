@@ -1,20 +1,16 @@
 from flask import Flask, request, render_template_string
 import pandas as pd
 import time
+import os
 
 app = Flask(__name__)
 EXCEL_FILE = "價格整理.xlsx"
 
-# ===================== 快取設定（新增） =====================
-CACHE_SECONDS = 300  # 5分鐘
-cache_main = None
-cache_main_time = 0
-
-cache_up = None
-cache_up_time = 0
-
-cache_history = None
-cache_history_time = 0
+# ===================== 快取設定 =====================
+CACHE_SECONDS = 300  # 最多5分鐘
+cache_data = {}
+cache_time = {}
+cache_file_mtime = 0
 
 
 # ===================== 主畫面 =====================
@@ -112,51 +108,33 @@ th{background:#eee}
 </body></html>
 """
 
-# ===================== 快取讀取 =====================
-def load_main():
-    global cache_main, cache_main_time
+# ===================== 快取核心 =====================
+def should_reload():
+    global cache_file_mtime
+    if not os.path.exists(EXCEL_FILE):
+        return True
+
+    mtime = os.path.getmtime(EXCEL_FILE)
+    if mtime != cache_file_mtime:
+        cache_file_mtime = mtime
+        return True
+    return False
+
+
+def load_sheet(sheet_name):
     now = time.time()
 
-    if cache_main is not None and now - cache_main_time < CACHE_SECONDS:
-        return cache_main
+    if (
+        sheet_name in cache_data
+        and sheet_name in cache_time
+        and (now - cache_time[sheet_name] < CACHE_SECONDS)
+        and not should_reload()
+    ):
+        return cache_data[sheet_name]
 
-    latest = pd.read_excel(EXCEL_FILE, sheet_name="最新進貨成本")
-    avg = pd.read_excel(EXCEL_FILE, sheet_name="平均進貨成本")
-    up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
-
-    df = latest.merge(avg, on=["品項編號", "品項名稱"], how="left")
-    df['狀態'] = df['品項編號'].isin(up['品項編號']).map(lambda x: '⚠' if x else '')
-
-    cache_main = df
-    cache_main_time = now
-    return df
-
-
-def load_up():
-    global cache_up, cache_up_time
-    now = time.time()
-
-    if cache_up is not None and now - cache_up_time < CACHE_SECONDS:
-        return cache_up
-
-    df = pd.read_excel(EXCEL_FILE, sheet_name='漲價提醒')
-    cache_up = df
-    cache_up_time = now
-    return df
-
-
-def load_history():
-    global cache_history, cache_history_time
-    now = time.time()
-
-    if cache_history is not None and now - cache_history_time < CACHE_SECONDS:
-        return cache_history
-
-    df = pd.read_excel(EXCEL_FILE, sheet_name='整理後明細')
-    df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
-
-    cache_history = df
-    cache_history_time = now
+    df = pd.read_excel(EXCEL_FILE, sheet_name=sheet_name)
+    cache_data[sheet_name] = df
+    cache_time[sheet_name] = now
     return df
 
 
@@ -164,7 +142,13 @@ def load_history():
 @app.route('/')
 def index():
     q = request.args.get('q', '').strip()
-    df = load_main()
+
+    latest = load_sheet("最新進貨成本")
+    avg = load_sheet("平均進貨成本")
+    up = load_sheet("漲價提醒")
+
+    df = latest.merge(avg, on=["品項編號", "品項名稱"], how="left")
+    df['狀態'] = df['品項編號'].isin(up['品項編號']).map(lambda x: '⚠' if x else '')
 
     if q:
         df = df[
@@ -177,13 +161,14 @@ def index():
 
 @app.route('/up')
 def up():
-    df = load_up()
+    df = load_sheet("漲價提醒")
     return render_template_string(UP_HTML, rows=df)
 
 
 @app.route('/history')
 def history():
-    df = load_history().copy()
+    df = load_sheet("整理後明細").copy()
+    df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
 
     s = request.args.get('start')
     e = request.args.get('end')
@@ -201,4 +186,3 @@ def history():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
