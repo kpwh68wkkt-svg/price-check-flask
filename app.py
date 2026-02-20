@@ -1,9 +1,21 @@
-from flask import Flask, request, render_template_string, redirect, url_for
+from flask import Flask, request, render_template_string
 import pandas as pd
-import os
+import time
 
 app = Flask(__name__)
 EXCEL_FILE = "價格整理.xlsx"
+
+# ===================== 快取設定（新增） =====================
+CACHE_SECONDS = 300  # 5分鐘
+cache_main = None
+cache_main_time = 0
+
+cache_up = None
+cache_up_time = 0
+
+cache_history = None
+cache_history_time = 0
+
 
 # ===================== 主畫面 =====================
 MAIN_HTML = """
@@ -100,50 +112,93 @@ th{background:#eee}
 </body></html>
 """
 
-# ===================== 資料讀取 =====================
-
+# ===================== 快取讀取 =====================
 def load_main():
+    global cache_main, cache_main_time
+    now = time.time()
+
+    if cache_main is not None and now - cache_main_time < CACHE_SECONDS:
+        return cache_main
+
     latest = pd.read_excel(EXCEL_FILE, sheet_name="最新進貨成本")
     avg = pd.read_excel(EXCEL_FILE, sheet_name="平均進貨成本")
     up = pd.read_excel(EXCEL_FILE, sheet_name="漲價提醒")
-    df = latest.merge(avg,on=["品項編號","品項名稱"],how="left")
-    df['狀態']=df['品項編號'].isin(up['品項編號']).map(lambda x:'⚠' if x else '')
+
+    df = latest.merge(avg, on=["品項編號", "品項名稱"], how="left")
+    df['狀態'] = df['品項編號'].isin(up['品項編號']).map(lambda x: '⚠' if x else '')
+
+    cache_main = df
+    cache_main_time = now
     return df
 
+
+def load_up():
+    global cache_up, cache_up_time
+    now = time.time()
+
+    if cache_up is not None and now - cache_up_time < CACHE_SECONDS:
+        return cache_up
+
+    df = pd.read_excel(EXCEL_FILE, sheet_name='漲價提醒')
+    cache_up = df
+    cache_up_time = now
+    return df
+
+
+def load_history():
+    global cache_history, cache_history_time
+    now = time.time()
+
+    if cache_history is not None and now - cache_history_time < CACHE_SECONDS:
+        return cache_history
+
+    df = pd.read_excel(EXCEL_FILE, sheet_name='整理後明細')
+    df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
+
+    cache_history = df
+    cache_history_time = now
+    return df
+
+
+# ===================== 路由 =====================
 @app.route('/')
 def index():
-    q=request.args.get('q','').strip()
-    df=load_main()
-    if q: df=df[df['品項名稱'].astype(str).str.contains(q)|df['品項編號'].astype(str).str.contains(q)]
-    return render_template_string(MAIN_HTML,rows=df,q=q,error=None)
+    q = request.args.get('q', '').strip()
+    df = load_main()
+
+    if q:
+        df = df[
+            df['品項名稱'].astype(str).str.contains(q) |
+            df['品項編號'].astype(str).str.contains(q)
+        ]
+
+    return render_template_string(MAIN_HTML, rows=df, q=q, error=None)
+
 
 @app.route('/up')
 def up():
-    df=pd.read_excel(EXCEL_FILE,sheet_name='漲價提醒')
-    return render_template_string(UP_HTML,rows=df)
+    df = load_up()
+    return render_template_string(UP_HTML, rows=df)
+
 
 @app.route('/history')
 def history():
-    df=pd.read_excel(EXCEL_FILE,sheet_name='整理後明細')
+    df = load_history().copy()
 
-    # ⭐ 關鍵修正：統一轉成 datetime
-    df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
-
-    s=request.args.get('start')
-    e=request.args.get('end')
+    s = request.args.get('start')
+    e = request.args.get('end')
 
     if s:
-        s=pd.to_datetime(s)
-        df=df[df['日期']>=s]
+        df = df[df['日期'] >= pd.to_datetime(s)]
 
     if e:
-        e=pd.to_datetime(e)
-        df=df[df['日期']<=e]
+        df = df[df['日期'] <= pd.to_datetime(e)]
 
-    # 顯示格式轉回 yyyy/mm/dd
-    df['日期']=df['日期'].dt.strftime('%Y/%m/%d')
+    df['日期'] = df['日期'].dt.strftime('%Y/%m/%d')
 
-    return render_template_string(HISTORY_HTML,rows=df)
+    return render_template_string(HISTORY_HTML, rows=df)
 
-if __name__=='__main__':
-    app.run(host='0.0.0.0',port=5000)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
